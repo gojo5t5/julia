@@ -933,7 +933,8 @@ namespace {
                 JL_TIMING(LLVM_OPT);
 
                 //Run the optimization
-                (***PMs).run(M);
+                // (***PMs).run(M);
+                optimizeModule(M, &jl_ExecutionEngine->getTargetMachine(), optlevel, true, false);
 
                 uint64_t end_time = 0;
                 if (dump_llvm_opt_stream != NULL) {
