@@ -934,7 +934,7 @@ namespace {
 
                 //Run the optimization
                 // (***PMs).run(M);
-                optimizeModule(M, &jl_ExecutionEngine->getTargetMachine(), optlevel, true, false);
+                optimizeModule(M, &jl_ExecutionEngine->getTargetMachine(), optlevel);
 
                 uint64_t end_time = 0;
                 if (dump_llvm_opt_stream != NULL) {
