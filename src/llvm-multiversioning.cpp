@@ -1136,7 +1136,6 @@ static bool runMultiVersioning(Module &M, function_ref<LoopInfo&(Function&)> Get
     clone.emit_metadata();
 
     assert(!verifyModule(M));
-
     return true;
 }
 
