@@ -1033,6 +1033,10 @@ void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrinsics, b
                 MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
             }
         }
+#if defined(_COMPILER_ASAN_ENABLED_)
+        // Needed for both AddressSanitizerPass and ModuleAddressSanitizerPass
+        MPM.addPass(RequireAnalysisPass<ASanGlobalsMetadataAnalysis, Module>());
+#endif
         {
             FunctionPassManager FPM;
 #if defined(_COMPILER_ASAN_ENABLED_)
