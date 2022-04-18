@@ -6,6 +6,9 @@
 #include <llvm/IR/Value.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/PassPlugin.h>
+#include <llvm/Passes/StandardInstrumentations.h>
 
 #include <llvm/ExecutionEngine/Orc/IRCompileLayer.h>
 #include <llvm/ExecutionEngine/Orc/IRTransformLayer.h>
@@ -44,16 +47,32 @@
 # include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
 #endif
 
+#define JL_USE_NEW_PM
+
 using namespace llvm;
 
 extern "C" jl_cgparams_t jl_default_cgparams;
+
+struct NewPassManager {
+    StandardInstrumentations SI;
+    std::unique_ptr<PassInstrumentationCallbacks> PIC;
+    LoopAnalysisManager LAM;
+    FunctionAnalysisManager FAM;
+    CGSCCAnalysisManager CGAM;
+    ModuleAnalysisManager MAM;
+    PassBuilder PB;
+    ModulePassManager MPM;
+
+    NewPassManager(TargetMachine &TM, int opt_level, bool lower_intrinsics = true, bool dump_native = false, bool external_use = false);
+
+    void run(Module &M);
+};
 
 void addTargetPasses(legacy::PassManagerBase *PM, TargetMachine *TM);
 void addOptimizationPasses(legacy::PassManagerBase *PM, int opt_level, bool lower_intrinsics=true, bool dump_native=false, bool external_use=false);
 void addMachinePasses(legacy::PassManagerBase *PM, TargetMachine *TM, int optlevel);
 void jl_finalize_module(orc::ThreadSafeModule  m);
 void jl_merge_module(orc::ThreadSafeModule &dest, orc::ThreadSafeModule src);
-void optimizeModule(Module &M, TargetMachine *TM, int opt_level, bool lower_intrinsics=true, bool dump_native=false);
 GlobalVariable *jl_emit_RTLD_DEFAULT_var(Module *M);
 DataLayout jl_create_datalayout(TargetMachine &TM);
 

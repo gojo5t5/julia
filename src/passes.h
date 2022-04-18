@@ -65,6 +65,8 @@ struct FinalLowerGCPass : PassInfoMixin<FinalLowerGCPass> {
 };
 
 struct MultiVersioning : PassInfoMixin<MultiVersioning> {
+    bool external_use;
+    MultiVersioning(bool external_use = false) : external_use(external_use) {}
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
     static bool isRequired() { return true; }
 };

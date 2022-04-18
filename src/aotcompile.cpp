@@ -556,7 +556,8 @@ void jl_dump_native_impl(void *native_code,
             PM.add(createBitcodeWriterPass(unopt_bc_OS));
             PM.run(M);
         }
-        optimizeModule(M, TM.get(), jl_options.opt_level, true, true);
+        NewPassManager NPM(*TM, jl_options.opt_level, true, true);
+        NPM.run(M);
         legacy::PassManager PM;
         if (bc_fname)
             PM.add(createBitcodeWriterPass(bc_OS));
@@ -1049,7 +1050,7 @@ static void addSanitizers(ModulePassManager &MPM, int optlevel) {
     // }
 }
 
-static void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrinsics, bool dump_native)
+static void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrinsics, bool dump_native, bool external_use)
 {
     // TODO: CommonInstruction hoisting/sinking enables AllocOpt
     //       to merge allocations and sometimes eliminate them,
@@ -1115,7 +1116,7 @@ static void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrin
         }
         MPM.addPass(LowerSIMDLoop()); // Annotate loop marked with "loopinfo" as LLVM parallel loop
         if (dump_native) {
-            MPM.addPass(MultiVersioning());
+            MPM.addPass(MultiVersioning(external_use));
             MPM.addPass(CPUFeatures());
             // minimal clean-up to get rid of CPU feature checks
             if (opt_level == 1) {
@@ -1150,7 +1151,7 @@ static void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrin
     }
 
     if (dump_native)
-        MPM.addPass(MultiVersioning());
+        MPM.addPass(MultiVersioning(external_use));
     MPM.addPass(CPUFeatures());
     {
         FunctionPassManager FPM;
@@ -1314,80 +1315,88 @@ static void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrin
 // TargetMachine::registerPassBuilderCallbacks. We need to find a solution either in working with upstream
 // or adapting PassBuilder (or subclassing it) to suite our needs. This is in particular important for
 // BPF, NVPTX, and AMDGPU.
-
-void optimizeModule(Module &M, TargetMachine *TM, int opt_level, bool lower_intrinsics, bool dump_native)
-{
-    // llvm::PassBuilder pb(targetMachine->LLVM, llvm::PipelineTuningOptions(), llvm::None, &passInstrumentationCallbacks);
-    PassInstrumentationCallbacks PIC;
-    StandardInstrumentations SI(false);
-    SI.registerCallbacks(PIC);
+namespace { // NewPM
+    auto createPIC(StandardInstrumentations &SI) {
+        auto PIC = std::make_unique<PassInstrumentationCallbacks>();
+        SI.registerCallbacks(*PIC);
 
 //Borrowed from LLVM PassBuilder.cpp:386
 #define MODULE_PASS(NAME, CREATE_PASS)                                         \
-PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
+PIC->addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
 #define MODULE_PASS_WITH_PARAMS(NAME, CLASS, CREATE_PASS, PARSER, PARAMS)      \
-PIC.addClassToPassName(CLASS, NAME);
+PIC->addClassToPassName(CLASS, NAME);
 #define MODULE_ANALYSIS(NAME, CREATE_PASS)                                     \
-PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
+PIC->addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
 #define FUNCTION_PASS(NAME, CREATE_PASS)                                       \
-PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
+PIC->addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
 #define FUNCTION_PASS_WITH_PARAMS(NAME, CLASS, CREATE_PASS, PARSER, PARAMS)    \
-PIC.addClassToPassName(CLASS, NAME);
+PIC->addClassToPassName(CLASS, NAME);
 #define FUNCTION_ANALYSIS(NAME, CREATE_PASS)                                   \
-PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
+PIC->addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
 #define LOOPNEST_PASS(NAME, CREATE_PASS)                                       \
-PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
+PIC->addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
 #define LOOP_PASS(NAME, CREATE_PASS)                                           \
-PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
+PIC->addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
 #define LOOP_PASS_WITH_PARAMS(NAME, CLASS, CREATE_PASS, PARSER, PARAMS)        \
-PIC.addClassToPassName(CLASS, NAME);
+PIC->addClassToPassName(CLASS, NAME);
 #define LOOP_ANALYSIS(NAME, CREATE_PASS)                                       \
-PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
+PIC->addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
 #define CGSCC_PASS(NAME, CREATE_PASS)                                          \
-PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
+PIC->addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
 #define CGSCC_PASS_WITH_PARAMS(NAME, CLASS, CREATE_PASS, PARSER, PARAMS)       \
-PIC.addClassToPassName(CLASS, NAME);
+PIC->addClassToPassName(CLASS, NAME);
 #define CGSCC_ANALYSIS(NAME, CREATE_PASS)                                      \
-PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
+PIC->addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
 
 #include "llvm-julia-passes.inc"
 
-    PassBuilder PB(TM, PipelineTuningOptions(), None, &PIC);
-    // Create the analysis managers.
-    LoopAnalysisManager LAM;
-    PB.registerLoopAnalyses(LAM);
-
-    AAManager AA;
-    // TODO: Why are we only doing this for -O3?
-    if (opt_level >= 3) {
-        AA.registerFunctionAnalysis<BasicAA>();
+        return PIC;
     }
-    if (opt_level >= 2) {
-        AA.registerFunctionAnalysis<ScopedNoAliasAA>();
-        AA.registerFunctionAnalysis<TypeBasedAA>();
+
+    auto createFAM(TargetMachine &TM, int opt_level) {
+        AAManager AA;
+        // TODO: Why are we only doing this for -O3?
+        if (opt_level >= 3) {
+            AA.registerFunctionAnalysis<BasicAA>();
+        }
+        if (opt_level >= 2) {
+            AA.registerFunctionAnalysis<ScopedNoAliasAA>();
+            AA.registerFunctionAnalysis<TypeBasedAA>();
+        }
+        // TM->registerDefaultAliasAnalyses(AA);
+
+        FunctionAnalysisManager FAM;
+        // Register the AA manager first so that our version is the one used.
+        FAM.registerPass([&] { return std::move(AA); });
+        // Register our TargetLibraryInfoImpl.
+        FAM.registerPass([&] { return llvm::TargetIRAnalysis(TM.getTargetIRAnalysis()); });
+        FAM.registerPass([&] { return llvm::TargetLibraryAnalysis(llvm::TargetLibraryInfoImpl(TM.getTargetTriple())); });
+        return FAM;
     }
-    // TM->registerDefaultAliasAnalyses(AA);
 
-    FunctionAnalysisManager FAM;
-    // Register the AA manager first so that our version is the one used.
-    FAM.registerPass([&] { return std::move(AA); });
-     // Register our TargetLibraryInfoImpl.
-    FAM.registerPass([&] { return llvm::TargetIRAnalysis(TM->getTargetIRAnalysis()); });
-    FAM.registerPass([&] { return llvm::TargetLibraryAnalysis(llvm::TargetLibraryInfoImpl(TM->getTargetTriple())); });
+    auto createPB(TargetMachine &TM, PassInstrumentationCallbacks &PIC, LoopAnalysisManager &LAM, FunctionAnalysisManager &FAM, CGSCCAnalysisManager &CGAM, ModuleAnalysisManager &MAM) {
+        PassBuilder PB(&TM, PipelineTuningOptions(), None, &PIC);
+        PB.registerLoopAnalyses(LAM);
+        PB.registerFunctionAnalyses(FAM);
+        PB.registerCGSCCAnalyses(CGAM);
+        PB.registerModuleAnalyses(MAM);
+        PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+        return PB;
+    }
 
-    PB.registerFunctionAnalyses(FAM);
+    auto createMPM(int opt_level, bool lower_intrinsics, bool dump_native, bool external_use) {
+        ModulePassManager MPM;
+        addPipeline(MPM, opt_level, lower_intrinsics, dump_native, external_use);
+        return MPM;
+    }
+}
 
-    CGSCCAnalysisManager CGAM;
-    PB.registerCGSCCAnalyses(CGAM);
+NewPassManager::NewPassManager(TargetMachine &TM, int opt_level, bool lower_intrinsics, bool dump_native, bool external_use)
+: SI(false), PIC(createPIC(SI)), LAM(), FAM(createFAM(TM, opt_level)), CGAM(), MAM(),
+    PB(createPB(TM, *PIC, LAM, FAM, CGAM, MAM)),
+    MPM(createMPM(opt_level, lower_intrinsics, dump_native, external_use)) {}
 
-    ModuleAnalysisManager MAM;
-    PB.registerModuleAnalyses(MAM);
-
-    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-
-    ModulePassManager MPM;
-    addPipeline(MPM, opt_level, lower_intrinsics, dump_native);
-
+void NewPassManager::run(Module &M) {
     MPM.run(M, MAM);
 }
 
@@ -1550,10 +1559,12 @@ void *jl_get_llvmf_defn_impl(jl_method_instance_t *mi, size_t world, char getwra
             // and will better match what's actually in sysimg.
             for (auto &global : output.globals)
                 global.second->setLinkage(GlobalValue::ExternalLinkage);
-            if (optimize)
+            if (optimize) {
                 //Safe b/c context lock is held by output
                 // PM->run(*m.getModuleUnlocked());
-                optimizeModule(*m.getModuleUnlocked(), &jl_ExecutionEngine->getTargetMachine(), jl_options.opt_level);
+                NewPassManager NPM(jl_ExecutionEngine->getTargetMachine(), jl_options.opt_level);
+                NPM.run(*m.getModuleUnlocked());
+            }
             const std::string *fname;
             if (decls.functionObject == "jl_fptr_args" || decls.functionObject == "jl_fptr_sparam")
                 getwrapper = false;
