@@ -957,7 +957,99 @@ void jl_add_optimization_passes_impl(LLVMPassManagerRef PM, int opt_level, int l
 }
 
 // new pass manager
-void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrinsics, bool dump_native)
+
+static void addSanitizers(ModulePassManager &MPM, int optlevel) {
+    // Coverage sanitizer
+    // if (CodeGenOpts.hasSanitizeCoverage()) {
+    //   auto SancovOpts = getSancovOptsFromCGOpts(CodeGenOpts);
+    //   MPM.addPass(ModuleSanitizerCoveragePass(
+    //       SancovOpts, CodeGenOpts.SanitizeCoverageAllowlistFiles,
+    //       CodeGenOpts.SanitizeCoverageIgnorelistFiles));
+    // }
+
+#ifdef _COMPILER_MSAN_ENABLED_
+    auto MSanPass = [&](/*SanitizerMask Mask, */bool CompileKernel) {
+    //   if (LangOpts.Sanitize.has(Mask)) {
+        // int TrackOrigins = CodeGenOpts.SanitizeMemoryTrackOrigins;
+        // bool Recover = CodeGenOpts.SanitizeRecover.has(Mask);
+
+        // MemorySanitizerOptions options(TrackOrigins, Recover, CompileKernel,
+        //                                CodeGenOpts.SanitizeMemoryParamRetval);
+        MemorySanitizerOptions options{};
+#if JL_LLVM_VERSION >= 140000
+        MPM.addPass(ModuleMemorySanitizerPass(options));
+#endif
+        FunctionPassManager FPM;
+        FPM.addPass(MemorySanitizerPass(options));
+        if (optlevel != 0) {
+          // MemorySanitizer inserts complex instrumentation that mostly
+          // follows the logic of the original code, but operates on
+          // "shadow" values. It can benefit from re-running some
+          // general purpose optimization passes.
+          FPM.addPass(EarlyCSEPass());
+          // TODO: Consider add more passes like in
+          // addGeneralOptsForMemorySanitizer. EarlyCSEPass makes visible
+          // difference on size. It's not clear if the rest is still
+          // usefull. InstCombinePass breakes
+          // compiler-rt/test/msan/select_origin.cpp.
+        }
+        MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+    //   }
+    };
+    MSanPass(/*SanitizerKind::Memory, */false);
+    // MSanPass(SanitizerKind::KernelMemory, true);
+#endif
+
+#ifdef _COMPILER_TSAN_ENABLED_
+    // if (LangOpts.Sanitize.has(SanitizerKind::Thread)) {
+#if JL_LLVM_VERSION >= 140000
+      MPM.addPass(ModuleThreadSanitizerPass());
+#endif
+      MPM.addPass(createModuleToFunctionPassAdaptor(ThreadSanitizerPass()));
+    // }
+#endif
+
+
+#ifdef _COMPILER_ASAN_ENABLED
+    auto ASanPass = [&](/*SanitizerMask Mask, */bool CompileKernel) {
+    //   if (LangOpts.Sanitize.has(Mask)) {
+        // bool UseGlobalGC = asanUseGlobalsGC(TargetTriple, CodeGenOpts);
+        // bool UseOdrIndicator = CodeGenOpts.SanitizeAddressUseOdrIndicator;
+        // llvm::AsanDtorKind DestructorKind =
+        //     CodeGenOpts.getSanitizeAddressDtor();
+        // AddressSanitizerOptions Opts;
+        // Opts.CompileKernel = CompileKernel;
+        // Opts.Recover = CodeGenOpts.SanitizeRecover.has(Mask);
+        // Opts.UseAfterScope = CodeGenOpts.SanitizeAddressUseAfterScope;
+        // Opts.UseAfterReturn = CodeGenOpts.getSanitizeAddressUseAfterReturn();
+        MPM.addPass(RequireAnalysisPass<ASanGlobalsMetadataAnalysis, Module>());
+        // MPM.addPass(ModuleAddressSanitizerPass(
+        //     Opts, UseGlobalGC, UseOdrIndicator, DestructorKind));
+        MPM.addPass(ModuleAddressSanitizerPass());
+        MPM.addPass(createModuleToFunctionPassAdaptor(AddressSanitizerPass()));
+    //   }
+    };
+    ASanPass(/*SanitizerKind::Address, */false);
+    // ASanPass(SanitizerKind::KernelAddress, true);
+#endif
+
+    // auto HWASanPass = [&](SanitizerMask Mask, bool CompileKernel) {
+    //   if (LangOpts.Sanitize.has(Mask)) {
+    //     bool Recover = CodeGenOpts.SanitizeRecover.has(Mask);
+    //     MPM.addPass(HWAddressSanitizerPass(
+    //         {CompileKernel, Recover,
+    //          /*DisableOptimization=*/CodeGenOpts.OptimizationLevel == 0}));
+    //   }
+    // };
+    // HWASanPass(/*SanitizerKind::HWAddress, */false);
+    // // HWASanPass(SanitizerKind::KernelHWAddress, true);
+
+    // if (LangOpts.Sanitize.has(SanitizerKind::DataFlow)) {
+    //   MPM.addPass(DataFlowSanitizerPass(LangOpts.NoSanitizeFiles));
+    // }
+}
+
+static void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrinsics, bool dump_native)
 {
     // TODO: CommonInstruction hoisting/sinking enables AllocOpt
     //       to merge allocations and sometimes eliminate them,
@@ -1033,23 +1125,7 @@ void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrinsics, b
                 MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
             }
         }
-#if defined(_COMPILER_ASAN_ENABLED_)
-        // Needed for both AddressSanitizerPass and ModuleAddressSanitizerPass
-        MPM.addPass(RequireAnalysisPass<ASanGlobalsMetadataAnalysis, Module>());
-#endif
-        {
-            FunctionPassManager FPM;
-#if defined(_COMPILER_ASAN_ENABLED_)
-            FPM.addPass(AddressSanitizerPass());
-#endif
-#if defined(_COMPILER_MSAN_ENABLED_)
-            FPM.addPass(MemorySanitizerPass());
-#endif
-#if defined(_COMPILER_TSAN_ENABLED_)
-            FPM.addPass(ThreadSanitizerPass());
-#endif
-            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
-        }
+        addSanitizers(MPM, opt_level);
         return;
     }
     {
@@ -1228,17 +1304,9 @@ void addPipeline(ModulePassManager &MPM, int opt_level, bool lower_intrinsics, b
         FunctionPassManager FPM;
         FPM.addPass(CombineMulAdd());
         FPM.addPass(DivRemPairsPass());
-#if defined(_COMPILER_ASAN_ENABLED_)
-        FPM.addPass(AddressSanitizerPass());
-#endif
-#if defined(_COMPILER_MSAN_ENABLED_)
-        FPM.addPass(MemorySanitizerPass());
-#endif
-#if defined(_COMPILER_TSAN_ENABLED_)
-        FPM.addPass(ThreadSanitizerPass());
-#endif
         MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
     }
+    addSanitizers(MPM, opt_level);
 }
 
 // TODO(vchuravy/maleadt):
@@ -1313,9 +1381,6 @@ PIC.addClassToPassName(decltype(CREATE_PASS)::name(), NAME);
     PB.registerCGSCCAnalyses(CGAM);
 
     ModuleAnalysisManager MAM;
-#ifdef _COMPILER_ASAN_ENABLED_
-    MAM.registerPass([&]{ return llvm::ASanGlobalsMetadataAnalysis(); });
-#endif
     PB.registerModuleAnalyses(MAM);
 
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
