@@ -1730,10 +1730,9 @@ function dims2cat(dims)
     ntuple(in(dims), maximum(dims))
 end
 
-_cat(dims, X...) = cat_t(promote_eltypeof(X...), X...; dims=dims)
+_cat(dims, X...) = cat_t(dims, promote_eltypeof(X...), X...)
 
-@inline cat_t(::Type{T}, X...; dims) where {T} = _cat_t(dims, T, X...)
-@inline function _cat_t(dims, ::Type{T}, X...) where {T}
+@inline function cat_t(dims, ::Type{T}, X...) where {T}
     catdims = dims2cat(dims)
     shape = cat_size_shape(catdims, X...)
     A = cat_similar(X[1], T, shape)
@@ -1880,8 +1879,8 @@ julia> reduce(hcat, vs)
 """
 hcat(X...) = cat(X...; dims=Val(2))
 
-typed_vcat(::Type{T}, X...) where T = cat_t(T, X...; dims=Val(1))
-typed_hcat(::Type{T}, X...) where T = cat_t(T, X...; dims=Val(2))
+typed_vcat(::Type{T}, X...) where T = cat_t(Val(1), T, X...)
+typed_hcat(::Type{T}, X...) where T = cat_t(Val(2), T, X...)
 
 """
     cat(A...; dims)
@@ -1917,7 +1916,8 @@ julia> cat(true, trues(2,2), trues(4)', dims=(1,2))
 ```
 """
 @inline cat(A...; dims) = _cat(dims, A...)
-_cat(catdims, A::AbstractArray{T}...) where {T} = cat_t(T, A...; dims=catdims)
+# `@constprop :aggressive` allows `catdims` to be propagated as constant improving return type inference
+@constprop :aggressive _cat(catdims, A::AbstractArray{T}...) where {T} = cat_t(catdims, T, A...)
 
 # The specializations for 1 and 2 inputs are important
 # especially when running with --inline=no, see #11158
@@ -1928,12 +1928,12 @@ hcat(A::AbstractArray) = cat(A; dims=Val(2))
 hcat(A::AbstractArray, B::AbstractArray) = cat(A, B; dims=Val(2))
 hcat(A::AbstractArray...) = cat(A...; dims=Val(2))
 
-typed_vcat(T::Type, A::AbstractArray) = cat_t(T, A; dims=Val(1))
-typed_vcat(T::Type, A::AbstractArray, B::AbstractArray) = cat_t(T, A, B; dims=Val(1))
-typed_vcat(T::Type, A::AbstractArray...) = cat_t(T, A...; dims=Val(1))
-typed_hcat(T::Type, A::AbstractArray) = cat_t(T, A; dims=Val(2))
-typed_hcat(T::Type, A::AbstractArray, B::AbstractArray) = cat_t(T, A, B; dims=Val(2))
-typed_hcat(T::Type, A::AbstractArray...) = cat_t(T, A...; dims=Val(2))
+typed_vcat(T::Type, A::AbstractArray) = cat_t(Val(1), T, A)
+typed_vcat(T::Type, A::AbstractArray, B::AbstractArray) = cat_t(Val(1), T, A, B)
+typed_vcat(T::Type, A::AbstractArray...) = cat_t(Val(1), T, A...)
+typed_hcat(T::Type, A::AbstractArray) = cat_t(Val(2), T, A)
+typed_hcat(T::Type, A::AbstractArray, B::AbstractArray) = cat_t(Val(2), T, A, B)
+typed_hcat(T::Type, A::AbstractArray...) = cat_t(Val(2), T, A...)
 
 # 2d horizontal and vertical concatenation
 
